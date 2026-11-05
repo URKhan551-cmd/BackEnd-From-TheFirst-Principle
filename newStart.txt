@@ -1,0 +1,5 @@
+lesson 3
+In the previous lesson, fs.readFileSync returned a raw 
+Buffer because no encoding was specified. To get a string
+instead, pass an options object with encoding: 'utf8' 
+as the second argument:
