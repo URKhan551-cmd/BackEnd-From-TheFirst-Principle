@@ -72,12 +72,12 @@ const fs = require("node:fs/promises");
 
 const pathFile = "./articles.json";
 
-async function getArticles(){
+export async function getArticles(){
     const content = await fs.readFile(pathFile, "utf8");
     return JSON.parse(content);
 }
 
-async function saveArticles(articles){
+export async function saveArticles(articles){
     await fs.writeFile(pathFile, JSON.stringify(articles, null, 2), "utf8");
 
 }

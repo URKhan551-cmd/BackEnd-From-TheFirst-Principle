@@ -1,0 +1,341 @@
+The deeper mental model
+There are three separate things:
+1. The file stored on disk.
+2. Request A's JavaScript array in memory.
+3. Request B's JavaScript array in memory.
+Changing one array does not update the other array or the file automatically.
+
+Only the subsequent write operation changes the stored file.
+
+This is the foundation of understanding concurrency.
+
+
+What are the solutions?
+There are several approaches, depending on the application.
+Approach	What it protects
+In-memory queue	Operations in one process
+In-process mutex	Critical sections in one process
+OS-level file lock	Cooperating processes accessing a shared file
+Distributed lock	Cooperating application instances
+Database transaction	Coordinated database changes
+
+
+Node's built-in fs/promises API does not itself provide a general-purpose cross-process file-locking abstraction. Engineers use platform-specific facilities or carefully selected locking libraries when file locking is necessary.
+
+For a real multi-instance backend, a database is usually the better solution.
+
+
+
+3: One more important detail: Node.js is single-threaded, so why do race conditions happen?
+You might be thinking:
+
+"If JavaScript runs on one main thread, how can two requests modify the same data simultaneously?"
+
+The answer is that concurrency does not require two JavaScript functions to execute instructions at precisely the same instant.
+
+Consider:
+async function operationA() {
+  console.log("A: start");
+
+  await fs.readFile("articles.json", "utf8");
+
+  console.log("A: continue");
+}
+
+async function operationB() {
+  console.log("B: start");
+
+  await fs.readFile("articles.json", "utf8");
+
+  console.log("B: continue");
+}
+
+operationA();
+operationB();
+
+A possible execution sequence:
+A: start
+B: start
+
+     File I/O happens asynchronously
+
+A: continue
+B: continue
+
+When A reaches await, it suspends until its Promise settles. JavaScript can then start B.
+
+The I/O operations can be outstanding concurrently, even though JavaScript executes their callbacks on the event loop one at a time.
+
+Some filesystem operations use libuv's thread pool; others can involve different OS mechanisms. The important point is that asynchronous filesystem operations can overlap.
+
+
+
+4:  An engineering limitation of our write queue
+Our simple queue is useful, but it has a weakness:
+let writeQueue = Promise.resolve();
+
+What if 50,000 requests arrive and all want to write?
+
+They can accumulate as pending operations.
+
+Consequences include:
+- Increasing memory usage.
+- Long waiting times.
+- Requests waiting behind slow disk operations.
+- An increasingly large backlog.
+Production systems may need a bounded queue, request throttling, timeouts, or a database-backed job-processing architecture.
+
+A queue solves coordination, but it does not automatically solve capacity.
+
+Q : Why can two asynchronous requests read the same old JSON data?   ==>> Your answer: We didn't serialize the calls because there is no proper lock or coordination around the critical section.
+
+(Correct)
+
+More precisely:
+Both requests can execute the read operation before either request finishes writing. They therefore receive the same old data.
+The problem isn't that JavaScript executes both instructions at exactly the same time. It's that their asynchronous operations overlap.
+
+
+Q : What exactly is a lost update?
+ANS: A lost update occurs when:
+- Multiple operations read the same earlier version of shared state.
+- Each calculates a new version independently.
+- One write overwrites another write.
+- The final state excludes one or more completed changes.
+This is a classic read-modify-write race condition.
+
+A critical detail: atomic file replacement doesn't solve this. Atomic replacement protects the integrity of an individual write. It does not guarantee that the data being written was based on the latest version.
+
+
+Q: Why must the read operation happen inside the queue, rather than before it?
+ANS: Let's trace two requests.
+
+Initial file: [Article 1]
+Time	Request A	Request B
+1	Reads [1]	
+2		Reads [1]
+3	Enters queue	
+4	Adds article 2, writes [1, 2]	
+5		Enters queue
+6		Adds article 3 to its old array, writes [1, 3]
+
+The writes happened sequentially. Yet the lost update still occurred.
+
+Why?
+Because Request B had already taken its snapshot before waiting for the queue.
+The queue serialized the writes, but it did not serialize the complete read-modify-write operation.
+The essential rule is:
+A lock or queue must cover the entire critical section, from reading shared state through committing the new state.
+
+What is a critical section?
+A critical section is the portion of a program that accesses or modifies shared state and must not overlap with competing operations in an unsafe way.
+
+
+
+Q: Why does an in-memory queue fail to coordinate multiple Node.js processes?
+ANS:: Now we move from application logic to operating-system process architecture.
+
+This is where a lot of developers develop an incomplete understanding of concurrency.
+First: what is a process?
+A process is a running instance of a program managed by the operating system.
+
+For example, you might start your server:
+node server.js
+
+
+The operating system creates a process with its own:
+- Memory space.
+- JavaScript runtime.
+- Event loop.
+- Module instances.
+- Variables and objects.
+- Open file descriptors.
+Your variable:
+let writeQueue = Promise.resolve();
+
+
+lives in the memory of that process.
+
+It is not automatically shared with other Node.js processes.
+One process: one queue
+Node.js Process A
+Shared application memory
+
+writeQueue
+
+Request A → Queue
+
+Request B → Queue
+
+Request C → Queue
+
+All three requests use the same queue.
+
+Now imagine you start a second process.
+Process A
+
+writeQueue A
+
+Request A1
+
+Request A2
+
+
+Process B
+
+writeQueue B
+
+Request B1
+
+Request B2
+
+
+
+
+Shared resource: same articles.json file
+articles.json
+
+One file, two independent queues
+
+No coordination between the queues
+
+Both processes have their own writeQueue.
+The variable names may be identical, but the actual Promise objects are different and reside in different process memories.
+Let's simulate the failure
+Suppose the JSON file initially contains:
+[{ "id": 1 }]
+
+
+Process A receives a request to add article 2.
+
+Process B receives a request to add article 3.
+
+Each process correctly uses its own queue.
+Time	Process A	Process B	File
+1	Queue A: read		[1]
+2		Queue B: read	[1]
+3	Queue A: write [1,2]		[1,2]
+4		Queue B: write [1,3]	[1,3]
+
+Both queues did their job perfectly.
+
+The architecture was wrong because the coordination mechanism existed only inside each process, while the resource was shared across processes.
+
+This is the fundamental distinction:
+- Process-local coordination: coordinates threads/tasks that participate in one process's memory.
+- Cross-process coordination: coordinates independent processes accessing the same resource.
+
+Where do multiple Node.js processes come from?
+Several common examples:
+
+1. Node cluster
+
+You can create multiple worker processes to handle incoming connections.
+
+2. Process managers
+
+Tools such as PM2 can run several application instances.
+
+3. Containers
+
+You might deploy several copies of your Node application.
+
+4. Multiple servers
+
+Your application may run on several machines behind a load balancer.
+
+5. Serverless
+
+Multiple function instances can execute independently, possibly at the same time.
+In all these cases, an in-memory Promise queue in one process cannot coordinate with another process.
+
+
+
+
+Q: What does a database transaction provide that a simple atomic file write does not?
+ANS:  We create a temporary file, write the content, and rename it over the original.
+
+That protects one file replacement from being observed in a partially written state, assuming the filesystem supports the expected rename semantics.
+
+But it does not protect the entire business operation.
+Atomic file replacement versus transaction
+Imagine an online store processing an order.
+
+When a customer purchases an item, the application must:
+1. Create an order.
+2. Decrease the product's inventory.
+3. Record the payment.
+4. Update the customer's purchase history.
+These are related operations.
+
+What happens if the order is created successfully, but the inventory update fails?
+
+You could end up with an order that exists while the product inventory remains unchanged.
+
+Or suppose inventory is decreased, but payment recording fails.
+
+You now have an inconsistent business state.
+
+An atomic write to one JSON file does not automatically coordinate changes across several files or operations.
+
+What is a database transaction?
+A transaction groups multiple database operations into one logical unit of work.
+
+The application tells the database:
+These operations belong together. Commit all of them if they succeed. Otherwise, roll back the transaction.
+
+For example:
+BEGIN;
+
+INSERT INTO orders (customer_id, product_id, quantity)
+VALUES (42, 101, 1);
+
+UPDATE products
+SET stock = stock - 1
+WHERE id = 101 AND stock >= 1;
+
+COMMIT;
+
+This is illustrative SQL; a real application must check whether the inventory update actually affected a row before committing.
+If the required operations cannot complete, the application can issue:
+
+ROLLBACK;
+
+The database transaction provides guarantees that go beyond replacing one file.
+The ACID model
+Database transactions are commonly described using four properties: ACID.
+A
+Atomicity
+
+Either the transaction's changes are committed together, or they are rolled back.
+
+Example: an order must not be committed without its required inventory update.
+
+
+C
+Consistency
+
+A transaction must preserve the database's defined rules and constraints.
+
+Example: a product's stock must never become negative if a database constraint or correctly implemented transaction enforces that rule.
+
+
+I
+Isolation
+
+Concurrent transactions are controlled so that they do not produce unacceptable interference.
+
+Example: two customers trying to buy the final product cannot both successfully reserve it.
+
+
+D
+Durability
+
+After a successful commit, the database is designed to preserve the committed changes across failures, subject to its durability configuration and storage guarantees.
+ACID property	What it means compared with our JSON approach
+Atomicity	Multiple related changes can be committed or rolled back together.
+Consistency	Database constraints can enforce rules such as unique IDs and valid foreign keys.
+Isolation	Database concurrency control coordinates competing transactions.
+Durability	A committed transaction is protected by the database's recovery and persistence mechanisms.
+
+Our atomicWriteFile() primarily addresses a limited form of atomic replacement. It does not provide full ACID transactions.

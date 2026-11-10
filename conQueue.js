@@ -5,6 +5,12 @@
         //    write Queue: controls the order of operations.
 // request A running     ------ request B waiting  ------- request C waiting
 
+import {getArticles, saveArticels} from "./concurrencyLearn.js";
+const fs = require("node:fs/promises");
+const path = require("node:path");
+import {atomicWrite} from "./atomicWrite.js";
+const pathFile = "./articles.json";
+
 
 // STEP 1: craete a queue.
 let writeQueue = Promise.resolve();
@@ -25,7 +31,7 @@ async function createArticle(article){
 
        articles.push(article);
         
-       await atomicWriteFile(pathFile, JSON.stringify(articles, null, 2));
+       await atomicWrite(pathFile, JSON.stringify(articles, null, 2));
 
        return article;
     });
@@ -50,7 +56,7 @@ async function updateArticle(id, updates){
         };
 
 
-        await atomicWriteFile(pathFile, JSON.stringify(articles, null, 2));
+        await atomicWrite(pathFile, JSON.stringify(articles, null, 2));
 
         return true;
     });
@@ -62,9 +68,9 @@ async function updateArticle(id, updates){
 // STEP C : test it 
 async function main(){
     const result = await Promise.all([
-        createArticle({_id: 2, title: "Article A"}),
-        createArticle({_id: 3, title: "Article B"}),
-        createArticle({_id: 4, title: "Article C"}),
+        createArticle({_id: 7, title: "Article H"}),
+        createArticle({_id: 8, title: "Article I"}),
+        createArticle({_id: 9, title: "Article J"}),
     ]);
 
     console.log("Created: ", results);
@@ -87,9 +93,14 @@ main().catch(console.error);
 // it ensure that only one participating operation can enter a protected critical section at a time.
 // A critical section is the part of our program that accesses shared mutable state.
 
+
+/*
+
 const articles = await getArticles();
 articles.push(article);
 await atomicWriteFile(pathFile, JSON.stringify(articles));
+
+*/
 
 // that entire sequence is CRITICAL SEQUENCE.
 
@@ -217,3 +228,85 @@ await atomicWriteFile(pathFile, JSON.stringify(articles));
 
 // Promise.all submits the calls, while the queue serializes their critical sections.
 
+
+
+// Concurrency knowledge check
+// 5/5 answered
+
+// 1. Two requests read the same JSON file. Both modify their arrays. The second write overwrites the first. What happened?
+
+// Deadlock
+
+// Lost update
+
+// File descriptor leak
+
+// Backpressure
+
+// Correct
+
+// Both operations used stale snapshots. One write replaced the other's change.
+
+
+
+// 2. You put only saveArticles() inside the queue. Why can data still be lost?
+
+// Promises cannot serialize writes
+
+// The file is too large
+
+// Both requests may read stale data before entering the queue
+
+// Node.js runs JavaScript on multiple main threads
+
+// Correct
+
+// The critical section begins at the read, not at the write. The read, modification, and write must all be coordinated.
+
+
+
+// 3. Two PM2 workers each have their own writeQueue, but both update the same JSON file. What is the problem?
+
+// The queues are independent process-local objects
+
+// Promises are not supported by PM2
+
+// The filesystem cannot handle two processes
+
+// The event loop is shared between workers
+
+// Correct
+
+// Each process has its own memory and queue. Neither queue knows about the other.
+
+
+
+// 4. What does a database transaction provide beyond atomic replacement of one file?
+
+// Only faster writes
+
+// A way to combine operations with isolation and rollback guarantees
+
+// A guarantee that business logic has no bugs
+
+// Automatic synchronization of all JavaScript variables
+
+// Correct
+
+// Transactions coordinate a logical group of database changes and provide ACID guarantees according to the database configuration.
+
+
+
+// 5. Two customers try to buy the final product. Which is the strongest design among these choices?
+
+// Read stock in JavaScript, then write a new stock value
+
+// Use Promise.all()
+
+// Use a conditional database update and check affected rows
+
+// Write the JSON file atomically
+
+// Correct
+
+// The condition and decrement are performed as one database operation, so only a request that finds stock available can decrement it.

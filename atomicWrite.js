@@ -8,12 +8,14 @@ const pathFile = "./build-file-processor/research.txt";
 
 
 // call this func with two parameters then see what hapen
-async function atomicWrite(Path, data){
+export async function atomicWrite(Path, data){
    const directory = path.dirname("path");
    const filename = path.basename("path");
 
-   // generate a unique temporary file
+   // generate a unique temporary file.
+
    const tempPath = path.join(directory, `.${filename}.${randomUUID()}.tmp`);
+   
    // directory is same filename becomes unique id with tmp extesion
 //    Why not simply use:  const tempPath = `${filePath}.tmp`;
 // Imagine two requests arrive simultaneously.
